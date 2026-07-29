@@ -1,0 +1,85 @@
+%% Mystery & Mayhem — System Architecture
+%% Streamlit game with two modes (Detective Mystery / Boss Fight) sharing one
+%% numeric-guessing core, an agentic Claude-backed clue/coach layer, and a
+%% reliability (validate + fallback) boundary around every LLM call.
+
+flowchart TD
+    User(["🧑 Player (Browser)"])
+
+    subgraph UI["app.py — Streamlit UI / Orchestration"]
+        ModeSel["Mode + Tier selectors\n(Detective Mystery / Boss Fight)"]
+        Inputs["Guess Input + Buttons\n(Submit / New Game / Show Hint)"]
+        DetectiveView["Detective view\n(case clues, history)"]
+        BossView["Boss Fight view\n(HP bar, damage/crit flavor)"]
+        Summary["Game Summary\n(attempts, avg error, best guess, efficiency%)"]
+        Debug["Developer Debug Info"]
+    end
+
+    subgraph State["st.session_state"]
+        S1["mode / tier"]
+        S2["secret / attempts / history / status / score"]
+        S3["revealed_fact_keys / clue_history (Detective)"]
+        S4["boss_hp / total_damage (Boss Fight)"]
+        S5["coach_review (cached once per game)"]
+    end
+
+    subgraph Logic["logic_utils.py — pure, deterministic core"]
+        L1["get_detective_tier_config / get_boss_tier_config"]
+        L2["parse_guess / check_guess"]
+        L3["update_score / calculate_boss_score"]
+        L4["compute_damage (closeness + crit)"]
+        L5["fact registry: get_available_facts,\nselect_fallback_fact, render_fallback_clue"]
+        L6["compute_stats / compute_efficiency"]
+    end
+
+    subgraph Agent["ai_agent.py — Agentic workflow + reliability layer"]
+        A1["Step 1 Analyze:\ngap + revealed_fact_keys"]
+        A2["Step 2 Tool Call (local Python):\nget_available_facts verifies\ntrue, unused facts"]
+        A3["Step 3 Refine & Output:\nsingle Claude call, JSON-schema\nenum-constrained fact_key"]
+        A4["Validate: fact_key in pool,\nno secret leak, non-empty"]
+        A5["Fallback: deterministic\ntemplate clue / coach text"]
+        A6["generate_coach_review:\nstats -> 2-3 sentence review"]
+    end
+
+    Claude[["☁️ Claude API\n(claude-haiku-4-5)"]]
+
+    subgraph Tests["Test Suite"]
+        T1["test_game_logic.py\n(pure functions, no mocking)"]
+        T2["test_ai_agent.py\n(FakeClient — no real API calls)"]
+    end
+
+    User -->|selects mode/tier| ModeSel
+    User -->|types guess, clicks button| Inputs
+    ModeSel -->|mode/tier change auto-resets| State
+    Inputs -->|Submit / New Game| State
+
+    ModeSel --> L1
+    Inputs --> L2 --> L3
+    Inputs -->|Boss Fight guess| L4
+    UI -->|render clues| DetectiveView
+    UI -->|render HP + flavor| BossView
+
+    Inputs -->|wrong guess, Detective mode| A1
+    A1 --> A2
+    A2 --> L5
+    A2 --> A3
+    A3 -->|constrained JSON request| Claude
+    Claude -->|fact_key + clue_text| A4
+    A4 -->|invalid / no key / error| A5
+    A5 --> L5
+    A4 -->|valid| DetectiveView
+    A5 --> DetectiveView
+
+    State -->|game ends| L6
+    L6 --> A6
+    A6 -->|coach call| Claude
+    Claude --> A6
+    A6 -->|failure / no key| A5
+    A6 --> Summary
+    A5 --> Summary
+
+    State <--> UI
+    UI --> Debug
+
+    T1 -.->|imports & asserts| Logic
+    T2 -.->|mocks client boundary, never network| Agent
