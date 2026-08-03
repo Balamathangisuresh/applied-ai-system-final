@@ -22,7 +22,7 @@ The full system diagram: [`diagrams/architecture.mmd`](diagrams/architecture.mmd
 - `app.py` is the Streamlit UI and orchestration layer only. It owns session state, the mode/tier selectors, the guess form, and rendering; it contains no game logic.
 
 - `logic_utils.py` is a pure, deterministic core with zero `streamlit`/`anthropic` imports: tier configs, `parse_guess`/`check_guess`, the boss-fight damage bands, the detective fact registry, and the end-of-game stats/efficiency math. Everything here is a plain function you can unit test with no mocking.
-- `ai_agent.py` the only module that talks to Claude. It runs the agentic clue workflow (Python verifies which facts about the secret are true and unrevealed then Claude calls phrases exactly one of them) and the end-of-game AI Coach review, with every response validated and backed by a deterministic fallback template if the call fails, the API key is missing, or the response looks wrong (leaks the secret, names an unverified fact, etc.).
+- `ai_agent.py` the only module that talks to Claude. It runs the agentic clue workflow — Python verifies which facts about the secret are true and unrevealed (`get_unrevealed_true_facts`), then Claude gets those facts plus the player's guess history and too-high/too-low direction, picks exactly one fact, and writes original noir narration around it. Every response is validated and backed by a deterministic fallback (mostly guess-relative comparative hints, occasionally a static fact template) if the call fails, the API key is missing, or the response looks wrong (leaks the secret, names an unverified fact, etc.).
 
 - **Claude API** (`claude-haiku-4-5`) is called only from `ai_agent.py`, never from `app.py` or `logic_utils.py` directly.
 
@@ -34,7 +34,7 @@ The full system diagram: [`diagrams/architecture.mmd`](diagrams/architecture.mmd
    ```
    pip install -r requirements.txt
    ```
-2. *(Optional)* To enable real Claude-generated clues and coaching instead of the deterministic fallback text, set an API key either as an environment variable:
+2. *(Optional)* To enable real Claude-generated clues instead of the deterministic fallback text, set an API key either as an environment variable:
    ```
    export ANTHROPIC_API_KEY=sk-ant-...
    ```
@@ -54,39 +54,33 @@ The full system diagram: [`diagrams/architecture.mmd`](diagrams/architecture.mmd
 
 ## Sample Interactions
 
-**Detective Mystery: wrong guess reveals a clue, then the case is solved:**
+**Detective Mystery: wrong guesses reveal clues in-theme with the safe-cracking premise, then the case is solved (real captured playthrough, fallback path — no API key configured):**
 ```
-Mode: Detective Mystery, Tier: Detective Case (range 1–75)
-Guess: 45  →  📉 Go LOWER!
-             Case file update: the safe's number is even.
-Guess: 20  →  📈 Go HIGHER!
-             Case file update: the sum of the safe's combination digits is 8.
-Guess: 26  →  🎉 Case solved! The combination was 26.
+Mode: Detective Mystery, Tier: Rookie Case (range 1–30), secret: 6
+Guess: 11  →  Case update: The safe lock's number is even.
+Guess: 3   →  Case update: The safe lock's number has 1 digit(s).
+Guess: 6   →  🎉 Case solved! The combination was 6.
 ```
+When a real `ANTHROPIC_API_KEY` is configured, Claude also receives the player's guess history and whether the last guess was too high or too low, so the clue reacts in character instead of just stating the fact — e.g. *"You inspect the dial — eleven felt far too high. A smudge on the brass reveals the true number is even."* — while still being restricted to only the same Python-verified facts shown above.
 
-**Boss Fight: distance-based damage across a round, ending in a critical hit:**
+**Boss Fight: distance-based damage across a round (attack result first, hint after), ending in a critical hit (real captured playthrough, secret: 14):**
 ```
 Mode: Boss Fight, Tier: Goblin (50 HP)
-Guess: 8   →  📉 Go LOWER!  🤏 A grazing hit. Little damage.        (1 damage, Boss HP: 49)
-Guess: 3   →  📈 Go HIGHER!  🔥 Massive damage! That was incredibly close!  (10 damage, Boss HP: 39)
-Guess: 2   →  🎉 Correct!  🎯 Critical hit! The attack strikes true!      (20 damage, Boss HP: 19)
+Guess: 18  →  🤏 A grazing hit. Little damage. 📉 Go LOWER!                (1 damage, Boss HP: 49)
+Guess: 15  →  🔥 Massive damage! That was incredibly close! 📉 Go LOWER!   (10 damage, Boss HP: 39)
+Guess: 14  →  🎯 Critical hit! The attack strikes true! 🎉 Correct!       (20 damage, Boss HP: 19)
              ✅ Round cleared! The boss braces itself — round 2 begins.
 ```
-
-**AI Coach: end-of-game review (fallback template shown; real Claude prose replaces this when an API key is configured):**
-```
-Game Summary: Attempts: 5, Average Error: 6.2, Best Guess: 24, Efficiency: 90%
-AI Coach: Excellent work — your guesses closed in on the target efficiently.
-```
-
 
 ## Design Decisions
 
 - **One shared numeric-guessing core, two presentations.** Both modes reduce to the same primitive: a secret, a guess, and `|guess − secret|` so `logic_utils.py` has a single `check_guess` and one fact/damage layer per mode instead of duplicating game logic. The trade-off is that `app.py` has to branch on `mode` in a few places rather than being two fully separate scripts.
 
-- **A single schema-constrained Claude call instead of a live tool-use loop.** The assignment's "Agentic Workflow" pattern (Analyze. Tool Call, Refine & Output) is implemented with Python doing the analysis and fact-verification locally, and exactly one Claude call is doing the phrasing. A full multi-turn tool-use loop where Claude picks which fact-check to run would look flashier, but it roughly doubles API calls per wrong guess and turns "did it pick a valid fact" into a probabilistic thing to test instead of a schema guarantee. Given this project's priorities (reliability, testability, cost), the single-call design won.
+- **A single schema-constrained Claude call instead of a live tool-use loop — but a genuinely context-aware one.** The assignment's "Agentic Workflow" pattern (Analyze, Tool Call, Refine & Output) is implemented with Python doing 100% of the analysis and fact-verification locally (`get_unrevealed_true_facts` returns plain, math-verified statements like "The number is divisible by 3.") and exactly one Claude call choosing which fact to reveal and writing original noir narration around it. That call also receives the player's full guess history and whether their last guess was too high or too low, so the phrasing genuinely reacts to how the round is going instead of just restating a fact in a vacuum — the LLM is doing real selection and composition, not reformatting a template. A full multi-turn tool-use loop where Claude decides which fact-check *function* to call would look flashier, but it roughly doubles API calls per wrong guess and turns "did it pick a valid fact" into a probabilistic thing to test instead of a schema guarantee. Given this project's priorities (reliability, testability, cost), the single-call-with-rich-context design won.
 
-- **Reliability is a first-class layer, not an afterthought.** Every Claude call in `ai_agent.py` is wrapped in validation (is the fact real and unused? does the text leak the secret? is it non-empty?) with a deterministic template fallback on any failure like a bad JSON, no API key, a timeout, or a hallucinated fact. The game is 100% playable and pytest never touches the network, at the cost of the fallback text being noticeably less varied than live Claude output.
+- **Reliability is a first-class layer, not an afterthought.** Every Claude call in `ai_agent.py` is wrapped in validation (is the fact real and unused? does the text leak the secret? is it non-empty?), with a deterministic fallback on any failure like a bad JSON, no API key, a timeout, or a hallucinated fact. The game is 100% playable and pytest never touches the network.
+
+- **The fallback mostly gives guess-relative comparisons, not just static facts.** Once it's clear the fallback path is doing the talking, `generate_comparative_hint` compares the current guess against the secret (parity, six small divisors, digit sum) and picks a random true comparison — e.g. "your guess divides by 4 but the lock's number doesn't, though both divide by 2." This is favored 80% of the time over a one-time static fact, both because it reads more like an actual detective reacting to your guess, and because it never runs dry the way a fixed 13-fact pool eventually does.
 
 - **Boss Fight is a series of rounds, not one long guess.** Guessing a round's number exactly clears that round (new secret, fresh attempt count) but keeps the boss's HP so a fight can be won either by repeated close hits or by landing exact guesses round after round. This made the mode feel like an actual fight instead of a single guess with a damage number attached, at the cost of more session-state to track (round number, rounds cleared, a fight-wide attack log for the end-game stats).
 
@@ -97,7 +91,7 @@ AI Coach: Excellent work — your guesses closed in on the target efficiently.
 
 ## Testing Summary
 
-The pytest suite (54 tests) splits along the same boundary as the code: `test_game_logic.py` covers every pure function like tier configs, `parse_guess`/`check_guess`, the boss damage bands, the detective fact registry (never repeats a fact, never leaks the secret), and the stats/efficiency math with no mocking needed. `test_ai_agent.py` mocks the Claude client at the exact call boundary and covers both the happy path and every fallback trigger: no API key, a raised exception, a hallucinated fact outside the allowed pool, a response that leaks the secret, malformed JSON, and an exhausted clue pool (asserted to never even attempt an API call).
+The pytest suite (62 tests) splits along the same boundary as the code: `test_game_logic.py` covers every pure function like tier configs, `parse_guess`/`check_guess`, the boss damage bands, the detective fact registry (never repeats a fact, never leaks the secret, `get_unrevealed_true_facts` returns plain math-verified statements), and the stats/efficiency math with no mocking needed. `test_ai_agent.py` mocks the Claude client at the exact call boundary and covers both the happy path and every fallback trigger: no API key, a raised exception, a hallucinated fact outside the allowed pool, a response that leaks the secret, malformed JSON, and an exhausted clue pool (asserted to never even attempt an API call) — plus two tests that inspect the actual prompt sent to the mocked client to confirm the guess history, too-high/too-low direction, and plain fact descriptions really do reach the LLM call.
 
 Since there was no way to click through a real browser in this environment, the app itself was driven end-to-end with Streamlit's `AppTest` harness, full playthroughs of wins and losses in both modes, mode/tier switching, and New Game resets, all asserted against session state rather than just eyeballed.
 

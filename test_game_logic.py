@@ -6,8 +6,10 @@ from logic_utils import (
     get_boss_tier_config,
     compute_boss_attack,
     get_available_facts,
+    get_unrevealed_true_facts,
     select_fallback_fact,
     render_fallback_clue,
+    generate_comparative_hint,
     compute_stats,
     compute_efficiency,
     compute_boss_run_stats,
@@ -214,6 +216,58 @@ def test_get_available_facts_empty_when_exhausted():
 
 def test_select_fallback_fact_returns_none_for_empty_list():
     assert select_fallback_fact([]) is None
+
+def test_get_unrevealed_true_facts_returns_plain_descriptions():
+    facts = get_unrevealed_true_facts(secret=36, low=1, high=75, revealed_fact_keys=[])
+    by_key = {f["fact_key"]: f["description"] for f in facts}
+    assert "is_even" in by_key
+    assert "even" in by_key["is_even"].lower()
+    assert "digit_sum" in by_key
+    assert "9" in by_key["digit_sum"]  # 3+6=9
+
+def test_get_unrevealed_true_facts_excludes_revealed_and_never_leaks_secret():
+    facts = get_unrevealed_true_facts(secret=137, low=1, high=150, revealed_fact_keys=["is_odd"])
+    fact_keys = {f["fact_key"] for f in facts}
+    assert "is_odd" not in fact_keys
+    for f in facts:
+        assert "137" not in f["description"]
+
+def test_get_unrevealed_true_facts_empty_when_exhausted():
+    all_keys = [f["fact_key"] for f in get_unrevealed_true_facts(36, 1, 75, [])]
+    assert get_unrevealed_true_facts(36, 1, 75, all_keys) == []
+
+def test_generate_comparative_hint_includes_direction_phrasing_sometimes():
+    hints = {generate_comparative_hint(61, 36, direction="Too High") for _ in range(100)}
+    assert any("lower" in h.lower() for h in hints)
+
+def test_generate_comparative_hint_flags_parity_match():
+    # 10 is even, 36 is even
+    hints = {generate_comparative_hint(10, 36, direction="Too Low") for _ in range(100)}
+    assert any("right track" in h.lower() and "even" in h.lower() for h in hints)
+
+def test_generate_comparative_hint_flags_parity_mismatch():
+    # 11 is odd, 36 is even
+    hints = {generate_comparative_hint(11, 36, direction="Too Low") for _ in range(100)}
+    assert any("not quite" in h.lower() for h in hints)
+
+def test_generate_comparative_hint_flags_divisor_mismatch_and_match():
+    # 24 divides by 4 (secret 18 doesn't) but both divide by 2
+    hints = {generate_comparative_hint(24, 18, direction="Too High") for _ in range(100)}
+    assert any("divides evenly by 4" in h and "does not" in h for h in hints)
+    assert any("right track" in h.lower() and "by 2" in h for h in hints)
+
+def test_generate_comparative_hint_digit_sum_match_reveals_shared_value():
+    # digit sum of 13 is 4; digit sum of 22 is also 4
+    hints = {generate_comparative_hint(13, 22, direction="Too High") for _ in range(100)}
+    assert any("right track" in h.lower() and "add up to 4" in h for h in hints)
+
+def test_generate_comparative_hint_never_leaks_the_secret_number():
+    for _ in range(30):
+        assert "18" not in generate_comparative_hint(24, 18, direction="Too High")
+
+def test_generate_comparative_hint_is_randomized():
+    variants = {generate_comparative_hint(61, 36, direction="Too High") for _ in range(60)}
+    assert len(variants) > 1
 
 def test_render_fallback_clue_never_leaks_secret():
     facts = get_available_facts(secret=137, low=1, high=150, revealed_fact_keys=[])

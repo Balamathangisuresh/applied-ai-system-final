@@ -14,9 +14,8 @@ from logic_utils import (
     compute_stats,
     compute_efficiency,
     compute_boss_run_stats,
-    compute_boss_efficiency,
 )
-from ai_agent import generate_detective_clue, generate_coach_review
+from ai_agent import generate_detective_clue
 from theme import inject_theme, theme_image, theme_tagline
 
 st.set_page_config(page_title="Mystery & Mayhem", page_icon="🎮")
@@ -73,7 +72,6 @@ def reset_game(mode, tier):
     st.session_state.attack_log = []
     st.session_state.last_damage = None
     st.session_state.last_crit = False
-    st.session_state.coach_review = None
     st.session_state.case_number = random.randint(1, 999)
 
 
@@ -128,6 +126,12 @@ with header_col:
 
 if mode == "detective":
     clues_placeholder = st.container()
+    feedback_placeholder = st.container()
+
+# Populated below (only if this run processes a submitted guess) and rendered
+# into feedback_placeholder further down — declared here so the render step
+# always has something to iterate, even on a rerun that wasn't a submission.
+detective_messages = []
 
 # A form binds the text input and its submit button into one atomic action —
 # without it, a fast click can fire before the typed value finishes syncing,
@@ -160,7 +164,18 @@ if st.session_state.status == "playing":
         if not ok:
             # Invalid input doesn't cost an attempt.
             st.session_state.history.append(raw_guess)
-            st.error(err)
+            if mode == "detective":
+                detective_messages.append(("error", err))
+            else:
+                st.error(err)
+        elif guess_int < low or guess_int > high:
+            # Out-of-range guesses don't cost an attempt either — just a nudge
+            # to stay within the tier's actual number range.
+            warning_msg = f"⚠️ Enter a number between {low} and {high}."
+            if mode == "detective":
+                detective_messages.append(("warning", warning_msg))
+            else:
+                st.warning(warning_msg)
         else:
             st.session_state.attempts += 1
             st.session_state.history.append(guess_int)
@@ -172,20 +187,27 @@ if st.session_state.status == "playing":
                 if outcome == "Win":
                     st.balloons()
                     st.session_state.status = "won"
-                    st.success(f"🎉 Case solved! The combination was {secret}.")
+                    detective_messages.append(("success", f"🎉 Case solved! The combination was {secret}."))
                 else:
-                    clue_result = generate_detective_clue(
-                        secret, guess_int, low, high, st.session_state.revealed_fact_keys
-                    )
-                    if clue_result["fact_key"]:
-                        st.session_state.revealed_fact_keys.append(clue_result["fact_key"])
-                    st.session_state.clue_history.append(clue_result["clue_text"])
-                    if show_hint:
-                        st.warning(clue_result["clue_text"])
+                    detective_messages.append(("error", "❌ Wrong combination."))
 
                     if st.session_state.attempts >= max_attempts:
+                        # No point generating (or paying for) a clue that will
+                        # never be seen — the case is over after this guess.
                         st.session_state.status = "lost"
-                        st.error(f"Case unsolved. The combination was {secret}.")
+                        detective_messages.append(("error", f"Case unsolved. The combination was {secret}."))
+                    else:
+                        clue_result = generate_detective_clue(
+                            secret, guess_int, low, high, st.session_state.revealed_fact_keys,
+                            guess_history=st.session_state.history[:-1],
+                            direction=outcome,
+                        )
+                        if clue_result["fact_key"]:
+                            st.session_state.revealed_fact_keys.append(clue_result["fact_key"])
+                        st.session_state.clue_history.append(clue_result["clue_text"])
+
+                        if show_hint:
+                            detective_messages.append(("warning", clue_result["clue_text"]))
 
             else:  # boss_fight — each round is its own mini number-guessing game
                 outcome, hint_message = check_guess(guess_int, secret)
@@ -199,7 +221,7 @@ if st.session_state.status == "playing":
                 st.session_state.last_crit = is_crit
 
                 if show_hint:
-                    st.warning(f"{hint_message} {flavor}")
+                    st.warning(f"{flavor} {hint_message}")
 
                 if st.session_state.boss_hp <= 0:
                     st.session_state.status = "won"
@@ -229,24 +251,6 @@ if st.session_state.status == "playing":
                         f"Out of attempts this round! The boss defeats you. "
                         f"Boss HP remaining: {max(0, st.session_state.boss_hp)} / {tier_config['max_hp']}."
                     )
-
-        if st.session_state.status != "playing" and st.session_state.coach_review is None:
-            if mode == "detective":
-                stats = compute_stats(st.session_state.history, st.session_state.secret)
-                stats["attempts"] = st.session_state.attempts
-                stats["efficiency_pct"] = compute_efficiency(high - low, st.session_state.attempts)
-            else:
-                boss_stats = compute_boss_run_stats(st.session_state.attack_log)
-                rounds_played = st.session_state.rounds_won + 1
-                stats = {
-                    "attempts": st.session_state.total_attempts,
-                    "average_error": boss_stats["average_error"],
-                    "best_guess": boss_stats["best_error"],
-                    "efficiency_pct": compute_boss_efficiency(
-                        high - low, rounds_played, st.session_state.total_attempts
-                    ),
-                }
-            st.session_state.coach_review = generate_coach_review(stats)
 elif mode == "detective":
     if st.session_state.status == "won":
         st.success("✅ Case already solved. Start a new game to try another.")
@@ -268,6 +272,9 @@ if mode == "detective":
     with clues_placeholder:
         for clue in st.session_state.clue_history:
             st.caption(f"🗂️ {clue}")
+    with feedback_placeholder:
+        for kind, text in detective_messages:
+            getattr(st, kind)(text)
 else:
     round_info_placeholder.info(
         f"Round {st.session_state.round_number} — guess a number between {low} and {high}. "
@@ -301,9 +308,6 @@ if st.session_state.status != "playing":
         )
         c4.metric("Rounds Cleared", st.session_state.rounds_won)
 
-    if st.session_state.coach_review:
-        st.info(f"**AI Coach:** {st.session_state.coach_review['text']}")
-
 with st.expander("Developer Debug Info"):
     st.write("Mode:", mode)
     st.write("Tier:", tier)
@@ -320,8 +324,6 @@ with st.expander("Developer Debug Info"):
         st.write("Rounds cleared:", st.session_state.rounds_won)
         st.write("Boss HP:", st.session_state.boss_hp)
         st.write("Score:", st.session_state.score)
-    if st.session_state.coach_review:
-        st.write("Coach review source:", st.session_state.coach_review["source"])
 
 st.divider()
-st.caption("Built with a locally-verified agentic clue engine and an AI coach — both degrade gracefully without an API key.")
+st.caption("Built with a locally-verified agentic clue engine that degrades gracefully without an API key.")

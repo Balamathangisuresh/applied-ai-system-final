@@ -1,4 +1,5 @@
 import math
+import random
 
 # ---------------------------------------------------------------------------
 # Shared parsing / comparison primitives
@@ -140,70 +141,163 @@ def _digit_sum(n: int) -> int:
     return sum(int(d) for d in str(abs(n)))
 
 
+def _digits(n: int) -> str:
+    return str(abs(n))
+
+
+def _tens_digit_is_double_units(n: int) -> bool:
+    d = _digits(n)
+    if len(d) != 2:
+        return False
+    tens, units = int(d[0]), int(d[1])
+    return units != 0 and tens == 2 * units
+
+
+def _contains_digit_7(n: int) -> bool:
+    return "7" in _digits(n)
+
+
+def _all_digits_identical(n: int) -> bool:
+    d = _digits(n)
+    return len(d) > 1 and len(set(d)) == 1
+
+
 _FACT_REGISTRY = [
     {
         "fact_key": "is_even",
         "coarseness": 1,
         "predicate": lambda secret, low, high: secret % 2 == 0,
-        "template": "Case file update: the safe's number is even.",
+        "description": "The number is even.",
+        "template": "Case update: The safe lock's number is even.",
     },
     {
         "fact_key": "is_odd",
         "coarseness": 1,
         "predicate": lambda secret, low, high: secret % 2 != 0,
-        "template": "Case file update: the safe's number is odd.",
+        "description": "The number is odd.",
+        "template": "Case update: The safe lock's number is odd.",
     },
     {
         "fact_key": "upper_half",
         "coarseness": 2,
         "predicate": lambda secret, low, high: secret > (low + high) / 2,
-        "template": "Case file update: the number lies in the upper half of the suspect range.",
+        "description": "The number lies in the upper half of the suspect range.",
+        "template": "Case update: The safe lock's number falls in the upper half of the suspect range.",
     },
     {
         "fact_key": "lower_half",
         "coarseness": 2,
         "predicate": lambda secret, low, high: secret <= (low + high) / 2,
-        "template": "Case file update: the number lies in the lower half of the suspect range.",
+        "description": "The number lies in the lower half of the suspect range.",
+        "template": "Case update: The safe lock's number falls in the lower half of the suspect range.",
     },
     {
         "fact_key": "divisible_by_3",
         "coarseness": 3,
         "predicate": lambda secret, low, high: secret % 3 == 0,
-        "template": "Case file update: the number is divisible by 3.",
+        "description": "The number is divisible by 3.",
+        "template": "Case update: The safe lock's number divides evenly by 3.",
     },
     {
         "fact_key": "divisible_by_4",
         "coarseness": 3,
         "predicate": lambda secret, low, high: secret % 4 == 0,
-        "template": "Case file update: the number is divisible by 4.",
+        "description": "The number is divisible by 4.",
+        "template": "Case update: The safe lock's number divides evenly by 4.",
+    },
+    {
+        "fact_key": "divisible_by_5",
+        "coarseness": 3,
+        "predicate": lambda secret, low, high: secret % 5 == 0,
+        "description": "The number is divisible by 5.",
+        "template": "Case update: The safe lock's number divides evenly by 5.",
+    },
+    {
+        "fact_key": "divisible_by_6",
+        "coarseness": 3,
+        "predicate": lambda secret, low, high: secret % 6 == 0,
+        "description": "The number is divisible by 6.",
+        "template": "Case update: The safe lock's number divides evenly by 6.",
+    },
+    {
+        "fact_key": "divisible_by_7",
+        "coarseness": 3,
+        "predicate": lambda secret, low, high: secret % 7 == 0,
+        "description": "The number is divisible by 7.",
+        "template": "Case update: The safe lock's number divides evenly by 7.",
+    },
+    {
+        "fact_key": "digit_sum_even",
+        "coarseness": 2,
+        "predicate": lambda secret, low, high: _digit_sum(secret) % 2 == 0,
+        "description": "The digits add up to an even sum.",
+        "template": "Case update: The safe lock's digits add up to an even sum.",
+    },
+    {
+        "fact_key": "digit_sum_odd",
+        "coarseness": 2,
+        "predicate": lambda secret, low, high: _digit_sum(secret) % 2 != 0,
+        "description": "The digits add up to an odd sum.",
+        "template": "Case update: The safe lock's digits add up to an odd sum.",
     },
     {
         "fact_key": "is_prime",
         "coarseness": 4,
         "predicate": lambda secret, low, high: _is_prime(secret),
-        "template": "Case file update: the number is prime.",
+        "description": "The number is prime.",
+        "template": "Case update: The safe lock's number is prime.",
     },
     {
         "fact_key": "is_perfect_square",
         "coarseness": 4,
         "predicate": lambda secret, low, high: _is_perfect_square(secret),
-        "template": "Case file update: the number is a perfect square.",
+        "description": "The number is a perfect square.",
+        "template": "Case update: The safe lock's number is a perfect square.",
     },
     {
         "fact_key": "digit_sum",
         "coarseness": 5,
         "predicate": lambda secret, low, high: True,
-        "template": "Case file update: the sum of the safe's combination digits is {value}.",
+        "description": "The digits sum to {value}.",
+        "template": "Case update: The sum of the digits on the safe lock equals {value}.",
         "value_fn": _digit_sum,
     },
     {
         "fact_key": "digit_count",
         "coarseness": 1,
         "predicate": lambda secret, low, high: True,
-        "template": "Case file update: the safe's number has {value} digit(s).",
+        "description": "The number has {value} digit(s).",
+        "template": "Case update: The safe lock's number has {value} digit(s).",
         "value_fn": lambda n: len(str(abs(n))),
     },
+    {
+        "fact_key": "tens_digit_double_units",
+        "coarseness": 4,
+        "predicate": lambda secret, low, high: _tens_digit_is_double_units(secret),
+        "description": "The tens digit is double the units digit.",
+        "template": "Case update: The safe lock's tens digit is double its units digit.",
+    },
+    {
+        "fact_key": "contains_digit_7",
+        "coarseness": 4,
+        "predicate": lambda secret, low, high: _contains_digit_7(secret),
+        "description": "It contains the digit 7 at least once.",
+        "template": "Case update: The safe lock's number contains the digit 7 at least once.",
+    },
+    {
+        "fact_key": "all_digits_identical",
+        "coarseness": 4,
+        "predicate": lambda secret, low, high: _all_digits_identical(secret),
+        "description": "All of its digits are identical.",
+        "template": "Case update: All of the safe lock's digits are identical.",
+    },
 ]
+
+
+def _render_text(text: str, fact: dict, secret: int) -> str:
+    if "value_fn" in fact:
+        return text.format(value=fact["value_fn"](secret))
+    return text
 
 
 def get_available_facts(secret: int, low: int, high: int, revealed_fact_keys):
@@ -218,21 +312,122 @@ def get_available_facts(secret: int, low: int, high: int, revealed_fact_keys):
     return sorted(available, key=lambda f: f["coarseness"])
 
 
+def get_unrevealed_true_facts(secret: int, low: int, high: int, revealed_fact_keys):
+    """
+    Raw, unformatted true-fact material for the LLM to reason over and choose
+    from — plain statements ("The number is even."), not in-theme clue text.
+    Python still does 100% of the math: every entry here is already verified
+    true about secret, so the LLM can never hallucinate a false fact.
+    """
+    available = get_available_facts(secret, low, high, revealed_fact_keys)
+    facts = [
+        {
+            "fact_key": fact["fact_key"],
+            "description": _render_text(fact["description"], fact, secret),
+        }
+        for fact in available
+    ]
+    random.shuffle(facts)  # presentation order only — doesn't affect which facts are true
+    return facts
+
+
 def select_fallback_fact(available_facts):
-    """Deterministically pick the least-revealing available fact, or None if empty."""
+    """Randomly pick one of the available facts, or None if empty — keeps clue
+    order varied across games instead of always the same vaguest-first order."""
     if not available_facts:
         return None
-    return available_facts[0]
+    return random.choice(available_facts)
 
 
 def render_fallback_clue(fact, secret: int):
     """Render a canned, secret-leak-free clue string for a fact dict."""
     if fact is None:
         return "No more clues available — trust your deductions, detective."
-    template = fact["template"]
-    if "value_fn" in fact:
-        return template.format(value=fact["value_fn"](secret))
-    return template
+    return _render_text(fact["template"], fact, secret)
+
+
+_TOO_HIGH_PHRASINGS = [
+    "Case update: That guess runs too high — the true number is lower.",
+    "Case update: The dial's reading too high, detective. Aim lower.",
+    "Case update: You've overshot the mark — the number is lower than that.",
+    "Case update: Too high. Trust your gut and try a lower number.",
+]
+
+_TOO_LOW_PHRASINGS = [
+    "Case update: That guess runs too low — the true number is higher.",
+    "Case update: The dial's reading too low, detective. Aim higher.",
+    "Case update: You've undershot the mark — the number is higher than that.",
+    "Case update: Too low. Trust your gut and try a higher number.",
+]
+
+_COMPARATIVE_DIVISORS = (2, 3, 4, 5, 6, 7)
+
+
+def _comparative_candidates(guess: int, secret: int, direction: str):
+    """Every true, secret-leak-safe statement comparing guess to secret —
+    parity, small-divisor overlap, digit sum, and the too-high/low direction."""
+    candidates = []
+
+    if direction == "Too High":
+        candidates.extend(_TOO_HIGH_PHRASINGS)
+    elif direction == "Too Low":
+        candidates.extend(_TOO_LOW_PHRASINGS)
+
+    guess_even, secret_even = guess % 2 == 0, secret % 2 == 0
+    if guess_even == secret_even:
+        parity = "even" if secret_even else "odd"
+        candidates.append(
+            f"Case update: You're on the right track — like your guess, the safe lock's number is {parity}."
+        )
+    else:
+        guess_parity = "even" if guess_even else "odd"
+        secret_parity = "even" if secret_even else "odd"
+        candidates.append(
+            f"Case update: Not quite — your guess was {guess_parity}, but the safe lock's number is {secret_parity}."
+        )
+
+    for d in _COMPARATIVE_DIVISORS:
+        guess_div, secret_div = guess % d == 0, secret % d == 0
+        if guess_div and secret_div:
+            candidates.append(
+                f"Case update: You're on the right track — like your guess, the safe lock's number divides evenly by {d}."
+            )
+        elif secret_div and not guess_div:
+            candidates.append(
+                f"Case update: The safe lock's number divides evenly by {d}, but your guess doesn't — worth another look."
+            )
+        elif guess_div and not secret_div:
+            candidates.append(
+                f"Case update: Your guess divides evenly by {d}, but the safe lock's number does not."
+            )
+
+    guess_digit_sum, secret_digit_sum = _digit_sum(guess), _digit_sum(secret)
+    if guess_digit_sum == secret_digit_sum:
+        candidates.append(
+            f"Case update: You're on the right track — the safe lock's digits add up to {secret_digit_sum}, just like your guess!"
+        )
+    elif secret_digit_sum > guess_digit_sum:
+        candidates.append("Case update: The safe lock's digits add up to more than your guess's do.")
+    else:
+        candidates.append("Case update: The safe lock's digits add up to less than your guess's do.")
+
+    return candidates
+
+
+def generate_comparative_hint(guess: int, secret: int, direction: str = None):
+    """
+    Endless, guess-relative hint source: compares the current guess against
+    the secret (parity, small-divisor overlap, digit sum) plus the
+    too-high/too-low direction, then randomly picks one true comparison.
+    Unlike the one-time facts in _FACT_REGISTRY, this never runs dry — it's
+    relative to *this* guess, not a fixed fact about the secret — so it can
+    be given every attempt without ever repeating the exact same line twice
+    in a row by coincidence alone.
+    """
+    candidates = _comparative_candidates(guess, secret, direction)
+    if not candidates:
+        return "No more clues available — trust your deductions, detective."
+    return random.choice(candidates)
 
 
 # ---------------------------------------------------------------------------

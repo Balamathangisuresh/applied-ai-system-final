@@ -1,15 +1,22 @@
 import json
 import os
+import random
 
 from logic_utils import (
     get_available_facts,
+    get_unrevealed_true_facts,
     select_fallback_fact,
     render_fallback_clue,
+    generate_comparative_hint,
 )
 
-CLUE_MAX_CHARS = 300
-COACH_MAX_CHARS = 600
+CLUE_MAX_CHARS = 400
 DEFAULT_MODEL = "claude-haiku-4-5"
+
+_DIRECTION_HINTS = {
+    "Too High": "too high — the safe's true number is lower than that",
+    "Too Low": "too low — the safe's true number is higher than that",
+}
 
 
 def get_client(api_key=None):
@@ -35,39 +42,74 @@ def _extract_text(response):
     return None
 
 
-def generate_detective_clue(secret, guess, low, high, revealed_fact_keys, client=None, model=DEFAULT_MODEL):
+def _format_guess_history(guess_history):
+    numeric = [g for g in (guess_history or []) if isinstance(g, int)]
+    if not numeric:
+        return "none yet — this is their first guess"
+    return ", ".join(str(g) for g in numeric)
+
+
+COMPARATIVE_HINT_CHANCE = 0.8  # most hints should react to the current guess
+
+
+def _build_fallback_clue(guess, secret, direction, available):
     """
-    Analyze (Python): compute which true facts about secret are still unrevealed.
-    Tool Call (Python): get_available_facts already verified each fact against secret.
-    Refine & Output (Claude): pick one unused fact_key and phrase it as a clue.
+    Mostly favor an endless, guess-relative comparative hint over a one-time
+    static fact, so clue variety and order aren't fixed game to game — the
+    same static fact pool no longer always plays out even/odd, then digits,
+    then factors in the same sequence, and most attempts react to this guess.
+    """
+    if not available or random.random() < COMPARATIVE_HINT_CHANCE:
+        return {"clue_text": generate_comparative_hint(guess, secret, direction), "fact_key": None, "source": "fallback"}
+    fact = select_fallback_fact(available)
+    return {"clue_text": render_fallback_clue(fact, secret), "fact_key": fact["fact_key"], "source": "fallback"}
+
+
+def generate_detective_clue(
+    secret, guess, low, high, revealed_fact_keys,
+    guess_history=None, direction=None,
+    client=None, model=DEFAULT_MODEL,
+):
+    """
+    Analyze (Python): compute which true facts about secret are still unrevealed,
+    plus the player's guess history and whether this guess was too high/low.
+    Tool Call (Python): get_unrevealed_true_facts already verified every fact
+    against secret — Python owns 100% of the math, so the LLM can only ever
+    choose among facts that are actually true.
+    Refine & Output (Claude): acting as a noir Game Master, react to the guess
+    and the run so far, pick exactly one fact_key from the pool, and write
+    original atmospheric narration around it — no canned template phrasing.
     """
     available = get_available_facts(secret, low, high, revealed_fact_keys)
 
     if not available:
-        return {"clue_text": render_fallback_clue(None, secret), "fact_key": None, "source": "fallback"}
-
-    fallback_fact = select_fallback_fact(available)
+        # The one-time fact pool is dry, but a comparative hint never runs out
+        # — it's relative to this guess, not a fixed fact about the secret —
+        # so the player still gets useful, non-repetitive guidance every attempt.
+        return {"clue_text": generate_comparative_hint(guess, secret, direction), "fact_key": None, "source": "fallback"}
 
     if client is None:
         client = get_client()
 
     if client is None:
-        return {
-            "clue_text": render_fallback_clue(fallback_fact, secret),
-            "fact_key": fallback_fact["fact_key"],
-            "source": "fallback",
-        }
+        return _build_fallback_clue(guess, secret, direction, available)
 
-    allowed_keys = [f["fact_key"] for f in available]
+    facts = get_unrevealed_true_facts(secret, low, high, revealed_fact_keys)
+    allowed_keys = [f["fact_key"] for f in facts]
+    fact_lines = "\n".join(f"- {f['fact_key']}: {f['description']}" for f in facts)
+    direction_text = _DIRECTION_HINTS.get(direction, "unknown relative to the target")
 
     try:
         response = client.messages.create(
             model=model,
-            max_tokens=150,
+            max_tokens=180,
             system=(
-                "You are a Game Master Detective narrating a number-guessing mystery. "
-                "Pick exactly one fact_key from the allowed list and phrase it as a short, "
-                "thematic 'case file' clue. Never reveal the secret number itself."
+                "You are the Game Master of a 1940s noir detective mystery. The player is "
+                "cracking a safe by guessing its combination. React in character to how their "
+                "guess and prior attempts are going, then pick exactly one fact_key from the "
+                "list you're given and build a short, original clue around it. Never invent a "
+                "fact that wasn't given to you, and never state or imply the exact secret "
+                "number. Write 1-2 sentences — no canned phrasing, no repeating previous clues."
             ),
             output_config={
                 "format": {
@@ -86,8 +128,10 @@ def generate_detective_clue(secret, guess, low, high, revealed_fact_keys, client
             messages=[{
                 "role": "user",
                 "content": (
-                    f"The player just guessed {guess}. Allowed fact_keys: {allowed_keys}. "
-                    "Choose exactly one and write the clue."
+                    f"The player just guessed {guess}, which was {direction_text}. "
+                    f"Their guesses so far this case: {_format_guess_history(guess_history)}.\n\n"
+                    f"Verified true facts still available to reveal (choose exactly one):\n{fact_lines}\n\n"
+                    "Write the atmospheric clue now."
                 ),
             }],
         )
@@ -106,45 +150,4 @@ def generate_detective_clue(secret, guess, low, high, revealed_fact_keys, client
         return {"clue_text": clue_text, "fact_key": fact_key, "source": "llm"}
 
     except Exception:
-        return {
-            "clue_text": render_fallback_clue(fallback_fact, secret),
-            "fact_key": fallback_fact["fact_key"],
-            "source": "fallback",
-        }
-
-
-def _fallback_coach_text(stats):
-    efficiency = stats.get("efficiency_pct", 0)
-    if efficiency >= 80:
-        return "Excellent work — your guesses closed in on the target efficiently."
-    if efficiency >= 50:
-        return "Solid effort, though a few guesses drifted further than they needed to."
-    return "You got there eventually, but there's plenty of room to narrow your search faster."
-
-
-def generate_coach_review(stats, client=None, model=DEFAULT_MODEL):
-    if client is None:
-        client = get_client()
-
-    if client is None:
-        return {"text": _fallback_coach_text(stats), "source": "fallback"}
-
-    try:
-        response = client.messages.create(
-            model=model,
-            max_tokens=150,
-            system=(
-                "You are an encouraging game coach. Write 2-3 sentences of feedback "
-                "based only on the stats provided. Do not invent numbers."
-            ),
-            messages=[{
-                "role": "user",
-                "content": f"Stats: {json.dumps(stats)}",
-            }],
-        )
-        text = _extract_text(response)
-        if not text or not text.strip() or len(text) > COACH_MAX_CHARS:
-            raise ValueError("invalid coach text")
-        return {"text": text.strip(), "source": "llm"}
-    except Exception:
-        return {"text": _fallback_coach_text(stats), "source": "fallback"}
+        return _build_fallback_clue(guess, secret, direction, available)
